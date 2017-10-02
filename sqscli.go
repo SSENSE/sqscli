@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strconv"
 
@@ -15,6 +16,7 @@ import (
 )
 
 // service struct embeds the sqs connector
+// @TODO - maybe create a "Queue" type that encapsulates queue metadata !
 type service struct {
 	*sqs.SQS
 }
@@ -82,15 +84,17 @@ func toCSV(queue string) {
 		}
 
 		// Process
-		for i, m := range result.Messages {
+		for _, m := range result.Messages {
 			// Readd later
 			readdMessages = append(readdMessages, m)
 			formatCSV(m, fifo)
-			svc.deleteMessage(qURL, result.Messages[i])
+			//svc.deleteMessage(qURL, result.Messages[i])
 		}
-	}
 
-	// Readd the messages to the queue
+		// Delete in batch
+		svc.deleteMessageBatch(qURL, result.Messages)
+	}
+	// Re-add the messages to the queue
 	for _, m := range readdMessages {
 		svc.sendMessage(qURL, m, fifo)
 	}
@@ -133,8 +137,7 @@ func newService() *service {
 	keyID := os.Getenv("AWS_ACCESS_KEY_ID")
 	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
 	if keyID == "" || secretKey == "" {
-		fmt.Println("Missing connection credentials")
-		os.Exit(1)
+		log.Fatal("Missing connection credentials")
 	}
 	// Connect
 	sess, err := session.NewSession(&aws.Config{
@@ -142,8 +145,7 @@ func newService() *service {
 		Credentials: credentials.NewStaticCredentials(keyID, secretKey, ""),
 	})
 	if err != nil {
-		fmt.Println("Error connecting to AWS ", err)
-		os.Exit(1)
+		log.Fatal("Error connecting to AWS ", err)
 	}
 	svc := sqs.New(sess)
 	return &service{svc}
@@ -155,8 +157,7 @@ func (s *service) getQueueURL(name string) string {
 		QueueName: aws.String(name),
 	})
 	if err != nil {
-		fmt.Printf("Error finding queue %s: %s\n", name, err)
-		os.Exit(1)
+		log.Fatalf("Error finding queue %s: %s\n", name, err)
 	}
 	return *queueInfo.QueueUrl
 }
@@ -170,8 +171,7 @@ func (s *service) getQueueAttributes(queue string) *sqs.GetQueueAttributesOutput
 		},
 	})
 	if err != nil {
-		fmt.Printf("Error fetching queue attributes %s: %s\n", queue, err)
-		os.Exit(1)
+		log.Fatalf("Error fetching queue attributes %s: %s\n", queue, err)
 	}
 	return attr
 }
@@ -199,28 +199,39 @@ func (s *service) receiveMessages(queue string, num int64, fifo bool) *sqs.Recei
 	result, err := s.ReceiveMessage(messageInput)
 
 	if err != nil {
-		fmt.Println("Error fetching message ", err)
-		os.Exit(1)
+		log.Fatal("Error fetching message ", err)
 	}
 
 	return result
 }
 
-// isFIFO is true if the queue is a FIFO, else otherwise
-// this is an expensive operation, store the returned boolean in a variable
-func (s *service) isFIFO(queue string) bool {
-	attr := s.getQueueAttributes(queue)
+// sendMessageBatch pushes SQS messages in a queue
+// for performance reasons we have a FIFO argument
+// @TODO - implement
+// func (s *service) sendMessageBatch(queue string, messages []*sqs.Message, fifo bool) {}
 
-	if attr.Attributes["FifoQueue"] == nil {
-		return false
+// deleteMessageBatch deletes a batch of messages from a queue
+func (s *service) deleteMessageBatch(queue string, messages []*sqs.Message) {
+	// Prepare payload
+	var entries []*sqs.DeleteMessageBatchRequestEntry
+	for _, m := range messages {
+		entry := &sqs.DeleteMessageBatchRequestEntry{Id: m.MessageId, ReceiptHandle: m.ReceiptHandle}
+		entries = append(entries, entry)
+	}
+	// Batch ready
+	batchInput := sqs.DeleteMessageBatchInput{
+		Entries:  entries,
+		QueueUrl: aws.String(queue),
 	}
 
-	b, err := strconv.ParseBool(*attr.Attributes["FifoQueue"])
+	_, err := s.DeleteMessageBatch(&batchInput)
+	// @TODO - re-run errors - or not
+	// an error just means the message was not deleted and will be fetched on the next iteration (FIFO)
+	// for non-FIFO queues messages are processed one by one anyway
 	if err != nil {
-		fmt.Println("Error determining queue type", err)
-		os.Exit(1)
+		fmt.Println("Delete Error", err)
+		// os.Exit(1)
 	}
-	return b
 }
 
 // sendMessage pushes a SQS message in a queue
@@ -270,12 +281,11 @@ func (s *service) sendMessage(queue string, message *sqs.Message, fifo bool) {
 	_, err := s.SendMessage(messageInput)
 
 	if err != nil {
-		fmt.Println("Error sending message", err)
-		os.Exit(1)
+		log.Fatal("Error sending message", err)
 	}
 }
 
-// deleteMessage deletes a message in a queue
+// deleteMessage deletes a message from a queue
 func (s *service) deleteMessage(queue string, message *sqs.Message) {
 	_, err := s.DeleteMessage(&sqs.DeleteMessageInput{
 		QueueUrl:      &queue,
@@ -283,9 +293,24 @@ func (s *service) deleteMessage(queue string, message *sqs.Message) {
 	})
 
 	if err != nil {
-		fmt.Println("Delete Error", err)
-		os.Exit(1)
+		log.Fatal("Delete Error", err)
 	}
+}
+
+// isFIFO is true if the queue is a FIFO, else otherwise
+// this is an expensive operation, store the returned boolean in a variable
+func (s *service) isFIFO(queue string) bool {
+	attr := s.getQueueAttributes(queue)
+
+	if attr.Attributes["FifoQueue"] == nil {
+		return false
+	}
+
+	b, err := strconv.ParseBool(*attr.Attributes["FifoQueue"])
+	if err != nil {
+		log.Fatal("Error determining queue type", err)
+	}
+	return b
 }
 
 // - - - - - - - - - - - - - - - -
