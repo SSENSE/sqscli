@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -79,6 +80,7 @@ func toCSV(queue string) {
 	// Getting all messages
 	for {
 		result := svc.receiveMessages(qURL, 10, fifo) // Batch of 10
+
 		if len(result.Messages) == 0 {
 			break // We are done
 		}
@@ -88,15 +90,16 @@ func toCSV(queue string) {
 			// Readd later
 			readdMessages = append(readdMessages, m)
 			formatCSV(m, fifo)
-			//svc.deleteMessage(qURL, result.Messages[i])
 		}
 
 		// Delete in batch
 		svc.deleteMessageBatch(qURL, result.Messages)
 	}
+
 	// Re-add the messages to the queue
-	for _, m := range readdMessages {
-		svc.sendMessage(qURL, m, fifo)
+	errs := svc.sendMessageBatch(qURL, readdMessages, 10, fifo)
+	if len(errs) > 0 {
+		log.Fatal("There were errors re-adding the messages", errs)
 	}
 }
 
@@ -117,7 +120,7 @@ func insertCSVHead(fifo bool) {
 func formatCSV(m *sqs.Message, fifo bool) {
 	if fifo {
 		fmt.Printf("%s,%s,%s,%s,%s\n",
-			*m.Body,
+			strings.Join(strings.Fields(*m.Body), " "), // Remove spaces
 			*m.Attributes["MessageGroupId"],
 			*m.Attributes["MessageDeduplicationId"],
 			*m.Attributes["SequenceNumber"],
@@ -177,7 +180,7 @@ func (s *service) getQueueAttributes(queue string) *sqs.GetQueueAttributesOutput
 }
 
 // receiveMessages fetches SQS messages in batches
-func (s *service) receiveMessages(queue string, num int64, fifo bool) *sqs.ReceiveMessageOutput {
+func (s *service) receiveMessages(queue string, num int, fifo bool) *sqs.ReceiveMessageOutput {
 	// @TODO - use worker pools to fetch faster
 	messageInput := &sqs.ReceiveMessageInput{
 		QueueUrl: &queue,
@@ -187,7 +190,7 @@ func (s *service) receiveMessages(queue string, num int64, fifo bool) *sqs.Recei
 		MessageAttributeNames: []*string{
 			aws.String(sqs.QueueAttributeNameAll),
 		},
-		MaxNumberOfMessages: aws.Int64(num),
+		MaxNumberOfMessages: aws.Int64(int64(num)),
 		VisibilityTimeout:   aws.Int64(10), // 10 seconds
 		WaitTimeSeconds:     aws.Int64(0),
 	}
@@ -207,31 +210,49 @@ func (s *service) receiveMessages(queue string, num int64, fifo bool) *sqs.Recei
 
 // sendMessageBatch pushes SQS messages in a queue
 // for performance reasons we have a FIFO argument
-// @TODO - implement
-// func (s *service) sendMessageBatch(queue string, messages []*sqs.Message, fifo bool) {}
+func (s *service) sendMessageBatch(queue string, messages []*sqs.Message, batch int, fifo bool) []error {
 
-// deleteMessageBatch deletes a batch of messages from a queue
-func (s *service) deleteMessageBatch(queue string, messages []*sqs.Message) {
-	// Prepare payload
-	var entries []*sqs.DeleteMessageBatchRequestEntry
-	for _, m := range messages {
-		entry := &sqs.DeleteMessageBatchRequestEntry{Id: m.MessageId, ReceiptHandle: m.ReceiptHandle}
-		entries = append(entries, entry)
-	}
-	// Batch ready
-	batchInput := sqs.DeleteMessageBatchInput{
-		Entries:  entries,
-		QueueUrl: aws.String(queue),
-	}
+	var entries []*sqs.SendMessageBatchRequestEntry
+	var errors []error
 
-	_, err := s.DeleteMessageBatch(&batchInput)
-	// @TODO - re-run errors - or not
-	// an error just means the message was not deleted and will be fetched on the next iteration (FIFO)
-	// for non-FIFO queues messages are processed one by one anyway
-	if err != nil {
-		fmt.Println("Delete Error", err)
-		// os.Exit(1)
+	// For each Batches
+	for i := 0; i < len(messages); i += batch {
+		j := i + batch
+		if j > len(messages) {
+			j = len(messages)
+		}
+		// Prepare payload
+		entries = nil
+		for _, m := range messages[i:j] {
+			//uuid, _ := newUUID()
+			d := sqs.SendMessageBatchRequestEntry{
+				MessageAttributes: map[string]*sqs.MessageAttributeValue{
+					"SentTimestamp": &sqs.MessageAttributeValue{
+						DataType:    aws.String("String"),
+						StringValue: aws.String(*m.Attributes["SentTimestamp"]),
+					},
+				},
+				Id:          aws.String(*m.MessageId),
+				MessageBody: aws.String(*m.Body),
+			}
+			getBatchRequestEntryAttributes(&d, m, fifo)
+			entries = append(entries, &d)
+		}
+
+		messageInput := &sqs.SendMessageBatchInput{
+			Entries:  entries,
+			QueueUrl: aws.String(queue),
+		}
+
+		_, err := s.SendMessageBatch(messageInput)
+		if err != nil {
+			// We couldn't readd the messages
+			// this is bad because it means we will lose the message(s)
+			// still we need to continue in order not to lose more messages
+			errors = append(errors, err)
+		}
 	}
+	return errors
 }
 
 // sendMessage pushes a SQS message in a queue
@@ -285,6 +306,30 @@ func (s *service) sendMessage(queue string, message *sqs.Message, fifo bool) {
 	}
 }
 
+// deleteMessageBatch deletes a batch of messages from a queue
+func (s *service) deleteMessageBatch(queue string, messages []*sqs.Message) {
+	// Prepare payload
+	var entries []*sqs.DeleteMessageBatchRequestEntry
+	for _, m := range messages {
+		entry := &sqs.DeleteMessageBatchRequestEntry{Id: m.MessageId, ReceiptHandle: m.ReceiptHandle}
+		entries = append(entries, entry)
+	}
+	// Batch ready
+	batchInput := sqs.DeleteMessageBatchInput{
+		Entries:  entries,
+		QueueUrl: aws.String(queue),
+	}
+
+	_, err := s.DeleteMessageBatch(&batchInput)
+	// @TODO - re-run errors - or not
+	// an error just means the message was not deleted and will be fetched on the next iteration (FIFO)
+	// for non-FIFO queues messages are processed one by one anyway
+	if err != nil {
+		fmt.Println("Delete Error", err)
+		// os.Exit(1)
+	}
+}
+
 // deleteMessage deletes a message from a queue
 func (s *service) deleteMessage(queue string, message *sqs.Message) {
 	_, err := s.DeleteMessage(&sqs.DeleteMessageInput{
@@ -311,6 +356,39 @@ func (s *service) isFIFO(queue string) bool {
 		log.Fatal("Error determining queue type", err)
 	}
 	return b
+}
+
+// getBatchRequestEntryAttributes is a helper function for sendMessageBatch
+func getBatchRequestEntryAttributes(req *sqs.SendMessageBatchRequestEntry, m *sqs.Message, fifo bool) {
+	// FIFO ?
+	if fifo {
+		// Preparing Deduplication ID
+		uuid, _ := newUUID()
+		req.MessageDeduplicationId = aws.String(string(uuid))
+		req.MessageGroupId = aws.String(*m.Attributes["MessageGroupId"])
+		req.MessageAttributes["SequenceNumber"] = &sqs.MessageAttributeValue{
+			DataType:    aws.String("String"),
+			StringValue: aws.String(*m.Attributes["SequenceNumber"]),
+		}
+		req.MessageAttributes["MessageGroupId"] = &sqs.MessageAttributeValue{
+			DataType:    aws.String("String"),
+			StringValue: aws.String(*m.Attributes["MessageGroupId"]),
+		}
+		req.MessageAttributes["SenderId"] = &sqs.MessageAttributeValue{
+			DataType:    aws.String("String"),
+			StringValue: aws.String(*m.Attributes["SenderId"]),
+		}
+		req.MessageAttributes["ApproximateFirstReceiveTimestamp"] = &sqs.MessageAttributeValue{
+			DataType:    aws.String("String"),
+			StringValue: aws.String(*m.Attributes["ApproximateFirstReceiveTimestamp"]),
+		}
+		req.MessageAttributes["ApproximateReceiveCount"] = &sqs.MessageAttributeValue{
+			DataType:    aws.String("String"),
+			StringValue: aws.String(*m.Attributes["ApproximateReceiveCount"]),
+		}
+	} else {
+		req.DelaySeconds = aws.Int64(1)
+	}
 }
 
 // - - - - - - - - - - - - - - - -
