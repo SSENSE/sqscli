@@ -118,15 +118,22 @@ func insertCSVHead(fifo bool) {
 
 // formatCSV outputs a CSV formatted row
 func formatCSV(m *sqs.Message, fifo bool) {
+	// Remove spaces
+	mess := strings.Join(strings.Fields(*m.Body), " ")
+	// Escape double quotes
+	mess = strings.Replace(mess, "\"", "\\\"", -1)
+
 	if fifo {
 		fmt.Printf("%s,%s,%s,%s,%s\n",
-			strings.Join(strings.Fields(*m.Body), " "), // Remove spaces
+			mess,
 			*m.Attributes["MessageGroupId"],
 			*m.Attributes["MessageDeduplicationId"],
 			*m.Attributes["SequenceNumber"],
 			*m.Attributes["SentTimestamp"])
 	} else {
-		fmt.Printf("%s,%s\n", *m.Body, *m.Attributes["SentTimestamp"])
+		fmt.Printf("\"%s\",\"%s\"\n",
+			mess,
+			*m.Attributes["SentTimestamp"])
 	}
 }
 
