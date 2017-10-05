@@ -37,6 +37,7 @@ func init() {
 func main() {
 	// Subcommands
 	toCsvCommand := flag.NewFlagSet("qtocsv", flag.ExitOnError)
+	toQCommand := flag.NewFlagSet("qtoq", flag.ExitOnError)
 
 	// Flags
 	queueName := toCsvCommand.String("queue", "", "queue name")
@@ -44,14 +45,31 @@ func main() {
 	queueHelp := toCsvCommand.Bool("help", false, "help for qtocsv command")
 	toCsvCommand.BoolVar(queueHelp, "h", false, "help") // Aliasing
 
+	qFrom := toQCommand.String("queue1", "", "queue from")
+	toQCommand.StringVar(qFrom, "q1", "", "queue from") // Aliasing
+	qTo := toQCommand.String("queue2", "", "queue to")
+	toQCommand.StringVar(qTo, "q2", "", "queue to") // Aliasing
+	qToQHelp := toQCommand.Bool("help", false, "help for qtoq command")
+	toQCommand.BoolVar(qToQHelp, "h", false, "help") // Aliasing
+
 	// Command
 	switch os.Args[1] {
 	case "qtocsv":
 		toCsvCommand.Parse(os.Args[2:])
 		if *queueHelp {
 			toCSVUsage()
+			break
 		}
 		toCSV(*queueName)
+		break
+	case "qtoq":
+		toQCommand.Parse(os.Args[2:])
+		if *qToQHelp {
+			toQUsage()
+			break
+		}
+		toQ(*qFrom, *qTo)
+		break
 	default:
 		fmt.Println("Command not found.")
 	}
@@ -60,6 +78,49 @@ func main() {
 // - - - - - - - - - - - - - - - -
 //   COMMANDS
 // - - - - - - - - - - - - - - - -
+
+func toQ(qFrom, qTo string) {
+	// Verify
+	if len(qFrom) == 0 && len(qTo) == 0 {
+		fmt.Println("Required argument is missing.")
+		toQUsage()
+	}
+
+	// Connect
+	svc := newService()
+
+	// Get queues FQDN
+	qFromURL := svc.getQueueURL(qFrom)
+	qToURL := svc.getQueueURL(qTo)
+	fifo := svc.isFIFO(qFromURL)
+	fifo2 := svc.isFIFO(qToURL)
+	// Little sanity check on the queues
+	if fifo != fifo2 {
+		log.Fatal("Cannot redrive queues that are not of the same type")
+	}
+
+	// Query the queues
+	var readdMessages []*sqs.Message // Messages to re-add later
+	for {
+		result := svc.receiveMessages(qFromURL, 10, fifo) // Batch of 10
+
+		if len(result.Messages) == 0 {
+			break // We are done
+		}
+
+		// Process
+		readdMessages = append(readdMessages, result.Messages...)
+
+		// Delete in batch
+		svc.deleteMessageBatch(qFromURL, result.Messages)
+	}
+
+	// Re-add the messages to the queue
+	errs := svc.sendMessageBatch(qToURL, readdMessages, 10, fifo)
+	if len(errs) > 0 {
+		log.Fatal("There were errors re-adding the messages", errs)
+	}
+}
 
 // toCSV outputs the content of a queue in a CSV file
 func toCSV(queue string) {
@@ -437,7 +498,7 @@ func usage() {
 	fmt.Println("usage: sqscli <command> [<args>]")
 	fmt.Println("The most commonly used sqscli commands are: ")
 	fmt.Println(" qtocsv   Output a queue in a csv format")
-	fmt.Println(" blablabla  Send stuff")
+	fmt.Println(" qtoq     Redrive queue in another queue")
 	os.Exit(0)
 }
 
@@ -445,5 +506,13 @@ func toCSVUsage() {
 	fmt.Println("usage: sqscli qtocsv [options]")
 	fmt.Println("options:")
 	fmt.Println("  -queue required   Queue name")
+	os.Exit(0)
+}
+
+func toQUsage() {
+	fmt.Println("usage: sqscli qtoq [options]")
+	fmt.Println("options:")
+	fmt.Println("  -queue1 required   Queue from")
+	fmt.Println("  -queue2 required   Queue to")
 	os.Exit(0)
 }
