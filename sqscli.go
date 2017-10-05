@@ -79,49 +79,6 @@ func main() {
 //   COMMANDS
 // - - - - - - - - - - - - - - - -
 
-func toQ(qFrom, qTo string) {
-	// Verify
-	if len(qFrom) == 0 && len(qTo) == 0 {
-		fmt.Println("Required argument is missing.")
-		toQUsage()
-	}
-
-	// Connect
-	svc := newService()
-
-	// Get queues FQDN
-	qFromURL := svc.getQueueURL(qFrom)
-	qToURL := svc.getQueueURL(qTo)
-	fifo := svc.isFIFO(qFromURL)
-	fifo2 := svc.isFIFO(qToURL)
-	// Little sanity check on the queues
-	if fifo != fifo2 {
-		log.Fatal("Cannot redrive queues that are not of the same type")
-	}
-
-	// Query the queues
-	var readdMessages []*sqs.Message // Messages to re-add later
-	for {
-		result := svc.receiveMessages(qFromURL, 10, fifo) // Batch of 10
-
-		if len(result.Messages) == 0 {
-			break // We are done
-		}
-
-		// Process
-		readdMessages = append(readdMessages, result.Messages...)
-
-		// Delete in batch
-		svc.deleteMessageBatch(qFromURL, result.Messages)
-	}
-
-	// Re-add the messages to the queue
-	errs := svc.sendMessageBatch(qToURL, readdMessages, 10, fifo)
-	if len(errs) > 0 {
-		log.Fatal("There were errors re-adding the messages", errs)
-	}
-}
-
 // toCSV outputs the content of a queue in a CSV file
 func toCSV(queue string) {
 	// Verify
@@ -160,6 +117,51 @@ func toCSV(queue string) {
 
 	// Re-add the messages to the queue
 	errs := svc.sendMessageBatch(qURL, readdMessages, 10, fifo)
+	if len(errs) > 0 {
+		log.Fatal("There were errors re-adding the messages", errs)
+	}
+}
+
+// toQ redrives a queue in another queue of the same type
+// usefull to process DLQs for instance
+func toQ(qFrom, qTo string) {
+	// Verify
+	if len(qFrom) == 0 && len(qTo) == 0 {
+		fmt.Println("Required argument is missing.")
+		toQUsage()
+	}
+
+	// Connect
+	svc := newService()
+
+	// Get queues FQDN
+	qFromURL := svc.getQueueURL(qFrom)
+	qToURL := svc.getQueueURL(qTo)
+	fifo := svc.isFIFO(qFromURL)
+	fifo2 := svc.isFIFO(qToURL)
+	// Little sanity check on the queues
+	if fifo != fifo2 {
+		log.Fatal("Cannot redrive queues that are not of the same type")
+	}
+
+	// Query the queues
+	var readdMessages []*sqs.Message // Messages to re-add later
+	for {
+		result := svc.receiveMessages(qFromURL, 10, fifo) // Batch of 10
+
+		if len(result.Messages) == 0 {
+			break // We are done
+		}
+
+		// Process
+		readdMessages = append(readdMessages, result.Messages...)
+
+		// Delete in batch
+		svc.deleteMessageBatch(qFromURL, result.Messages)
+	}
+
+	// Re-add the messages to the queue
+	errs := svc.sendMessageBatch(qToURL, readdMessages, 10, fifo)
 	if len(errs) > 0 {
 		log.Fatal("There were errors re-adding the messages", errs)
 	}
