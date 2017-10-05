@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/csv"
 	"flag"
 	"fmt"
 	"io"
@@ -118,22 +119,33 @@ func insertCSVHead(fifo bool) {
 
 // formatCSV outputs a CSV formatted row
 func formatCSV(m *sqs.Message, fifo bool) {
+	var row []string
+
 	// Remove spaces
 	mess := strings.Join(strings.Fields(*m.Body), " ")
-	// Escape double quotes
-	mess = strings.Replace(mess, "\"", "\\\"", -1)
 
 	if fifo {
-		fmt.Printf("%s,%s,%s,%s,%s\n",
+		row = []string{
 			mess,
 			*m.Attributes["MessageGroupId"],
 			*m.Attributes["MessageDeduplicationId"],
 			*m.Attributes["SequenceNumber"],
-			*m.Attributes["SentTimestamp"])
+			*m.Attributes["SentTimestamp"],
+		}
 	} else {
-		fmt.Printf("\"%s\",\"%s\"\n",
+		row = []string{
 			mess,
-			*m.Attributes["SentTimestamp"])
+			*m.Attributes["SentTimestamp"],
+		}
+	}
+
+	w := csv.NewWriter(os.Stdout)
+	if err := w.Write(row); err != nil {
+		log.Fatalln("Error writing row to csv:", err)
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		log.Fatal(err)
 	}
 }
 
