@@ -14,6 +14,18 @@ options:
 
 Example: sqscli qtocsv -q #queue_name# > myfile.csv
 
+### qtoq
+Redrive a queue messages to another queue (from a DLQ to the main queue for instance)
+
+```
+usage: sqscli qtoq [options]
+options:
+  -queue1 required   Queue from
+  -queue2 required   Queue to
+```
+
+Example: sqscli qtoq -q1 #dlq_name# -q2 #queue_name#
+
 ## Setup
 
 ```bash
