@@ -32,3 +32,12 @@ Example: sqscli qtoq -q1 #dlq_name# -q2 #queue_name#
 # export environment variables
 export $(cat ./env/sqscli.env | xargs)
 ```
+
+## How to use this.
+First you must have `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` exported inside your terminal view.
+
+```bash
+export AWS_ACCESS_KEY_ID=XXXYYYZZZ
+export AWS_SECRET_ACCESS_KEY=ZZ/ABCDEFGH09876543KLMNN
+sqscli qtocsv -q your-queue-name > your-file-name.csv
+```
