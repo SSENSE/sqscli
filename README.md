@@ -31,6 +31,8 @@ Example: sqscli qtoq -q1 #dlq_name# -q2 #queue_name#
 ```bash
 # export environment variables
 export $(cat ./env/sqscli.env | xargs)
+go get -u github.com/aws/aws-sdk-go
+go build sqscli.go
 ```
 
 ## How to use this.
